@@ -49,15 +49,24 @@ export interface ScanEvent {
   timestamp: number;
 }
 
+/** Rolling per-strategy sample. `null` means no scans in that mode were recorded yet. */
 export interface MetricSnapshot {
   slot: number;
-  smartDetectionRate: number;
-  normalDetectionRate: number;
-  smartInterceptTime: number;
-  normalInterceptTime: number;
-  smartEfficiency: number;
-  normalEfficiency: number;
+  smartDetectionRate: number | null;
+  normalDetectionRate: number | null;
+  smartInterceptTime: number | null;
+  normalInterceptTime: number | null;
 }
+
+/** One row of the waterfall: band activity snapshot for a single time slot. */
+export interface SpectrumRow {
+  slot: number;
+  activity: number[];
+  scannedId: number;
+  detected: boolean;
+}
+
+export type ViewTab = 'scanner' | 'analytics' | 'missions' | 'method';
 
 export interface Mission {
   id: number;

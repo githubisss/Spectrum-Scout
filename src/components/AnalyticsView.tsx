@@ -1,18 +1,19 @@
 import React, { useMemo } from 'react';
 import {
-  AreaChart,
-  Area,
-  BarChart,
   Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
 } from 'recharts';
+import { Info } from 'lucide-react';
 import { MetricSnapshot, ScanEvent, ScanMode } from '../types/spectrum';
-import { Activity, ShieldCheck, Zap, Clock, Target, TrendingUp, AlertTriangle } from 'lucide-react';
+import { Label, Panel, cx } from './ui';
 
 interface AnalyticsViewProps {
   history: ScanEvent[];
@@ -20,452 +21,327 @@ interface AnalyticsViewProps {
   currentMode: ScanMode;
 }
 
-export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
-  history,
-  snapshots,
-  currentMode,
+interface ModeStats {
+  n: number;
+  pd: number | null;
+  pfa: number | null;
+  latency: number | null;
+  efficiency: number | null;
+  accuracy: number | null;
+}
+
+const SMART_COLOR = '#2dd4bf';
+const SEQ_COLOR = '#8b94a7';
+
+/** Latency, efficiency and accuracy are modeled from Pd; see README "Known Limitations". */
+export function modelLatency(mode: ScanMode, pd: number): number {
+  const ratio = pd / 100;
+  return mode === 'SMART' ? Math.round(140 + (1 - ratio) * 120) : Math.round(520 + (1 - ratio) * 350);
+}
+
+function computeStats(events: ScanEvent[], mode: ScanMode): ModeStats {
+  if (events.length === 0) {
+    return { n: 0, pd: null, pfa: null, latency: null, efficiency: null, accuracy: null };
+  }
+  const detections = events.filter((e) => e.detected).length;
+  const falseAlarms = events.filter((e) => !e.detected && e.signalLevel < -85).length;
+  const pd = Math.round((detections / events.length) * 100);
+  const ratio = pd / 100;
+  return {
+    n: events.length,
+    pd,
+    pfa: Math.round((falseAlarms / events.length) * 100),
+    latency: modelLatency(mode, pd),
+    efficiency:
+      mode === 'SMART' ? Math.round(82 + ratio * 12) : Math.round(28 + ratio * 15),
+    accuracy: mode === 'SMART' ? Math.round(80 + ratio * 10) : Math.round(35 + ratio * 10),
+  };
+}
+
+const fmt = (v: number | null, unit: string) => (v === null ? '—' : `${v}${unit}`);
+
+const SourceTag: React.FC<{ modeled?: boolean }> = ({ modeled }) => (
+  <span
+    title={
+      modeled
+        ? 'Derived from detection rate with a fixed formula, not measured directly'
+        : 'Computed directly from recorded scan events'
+    }
+    className={cx(
+      'rounded px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset',
+      modeled ? 'text-uncertain ring-uncertain/30' : 'text-accent ring-accent/30'
+    )}
+  >
+    {modeled ? 'Modeled' : 'Measured'}
+  </span>
+);
+
+interface MetricCardProps {
+  label: string;
+  unit: string;
+  smart: number | null;
+  seq: number | null;
+  scaleMax: number;
+  lowerIsBetter?: boolean;
+  modeled?: boolean;
+}
+
+const MetricCard: React.FC<MetricCardProps> = ({
+  label,
+  unit,
+  smart,
+  seq,
+  scaleMax,
+  lowerIsBetter,
+  modeled,
 }) => {
-  // Aggregate real simulation metrics from history
-  const {
-    smartStats,
-    normalStats,
-  } = useMemo(() => {
-    const smartEvents = history.filter((e) => e.mode === 'SMART');
-    const normalEvents = history.filter((e) => e.mode === 'NORMAL');
+  const rows = [
+    { name: 'Smart', value: smart, color: SMART_COLOR },
+    { name: 'Sequential', value: seq, color: SEQ_COLOR },
+  ];
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4">
+      <div className="flex items-start justify-between gap-2">
+        <Label>{label}</Label>
+        <SourceTag modeled={modeled} />
+      </div>
+      <div className="mt-2 font-mono text-2xl font-semibold text-fg tabular">{fmt(smart, unit)}</div>
+      <div className="text-[11px] text-faint">Smart scan{lowerIsBetter ? ' · lower is better' : ''}</div>
+      <div className="mt-3 space-y-1.5">
+        {rows.map((r) => (
+          <div key={r.name} className="flex items-center gap-2 text-xs">
+            <span className="w-16 text-muted">{r.name}</span>
+            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
+              <span
+                className="block h-full rounded-full transition-[width] duration-300"
+                style={{
+                  width: `${r.value === null ? 0 : Math.min(100, (r.value / scaleMax) * 100)}%`,
+                  backgroundColor: r.color,
+                }}
+              />
+            </span>
+            <span className="w-14 text-right font-mono text-muted tabular">{fmt(r.value, unit)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
-    const calcGroup = (events: ScanEvent[]) => {
-      if (events.length === 0) {
-        return {
-          detections: 0,
-          total: 0,
-          pd: 0,
-          pfa: 0,
-          interceptTime: 0,
-          scanEfficiency: 0,
-          accuracy: 0,
-        };
-      }
+const axisProps = { stroke: '#5e687a', fontSize: 11, tickLine: false, axisLine: false } as const;
+const tooltipStyle = {
+  contentStyle: {
+    backgroundColor: '#10141b',
+    border: '1px solid #2f3847',
+    borderRadius: 8,
+    fontSize: 12,
+    color: '#e7eaf0',
+  },
+  labelStyle: { color: '#939cae' },
+  cursor: { stroke: '#2f3847' },
+};
 
-      const detections = events.filter((e) => e.detected).length;
-      const pd = Math.round((detections / events.length) * 100);
-      const falseAlarms = events.filter((e) => !e.detected && e.signalLevel < -85).length;
-      const pfa = Math.max(2, Math.round((falseAlarms / events.length) * 100));
+const EmptyChart: React.FC<{ text: string }> = ({ text }) => (
+  <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-line text-xs text-faint">
+    {text}
+  </div>
+);
 
-      return {
-        detections,
-        total: events.length,
-        pd: Math.min(96, Math.max(10, pd)),
-        pfa,
-        interceptTime: 0, // calculated below
-        scanEfficiency: 0,
-        accuracy: 0,
-      };
-    };
+export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ history, snapshots, currentMode }) => {
+  const { smart, seq } = useMemo(
+    () => ({
+      smart: computeStats(history.filter((e) => e.mode === 'SMART'), 'SMART'),
+      seq: computeStats(history.filter((e) => e.mode === 'NORMAL'), 'NORMAL'),
+    }),
+    [history]
+  );
 
-    const s = calcGroup(smartEvents);
-    const n = calcGroup(normalEvents);
+  const latencyMax = Math.max(smart.latency ?? 0, seq.latency ?? 0, 1);
 
-    // Dynamic calculated intercept and efficiency values derived from actual detection ratios
-    const smartPdRatio = (s.pd || 88) / 100;
-    const normalPdRatio = (n.pd || 38) / 100;
-
+  const diff = (a: number | null, b: number | null, unit: string, lowerIsBetter = false) => {
+    if (a === null || b === null) return { text: '—', good: false };
+    const d = a - b;
     return {
-      smartStats: {
-        ...s,
-        pd: s.total > 0 ? s.pd : 91,
-        pfa: s.total > 0 ? s.pfa : 4,
-        interceptTime: Math.round(140 + (1 - smartPdRatio) * 120), // ~150ms
-        scanEfficiency: Math.round(82 + smartPdRatio * 12), // ~92%
-        accuracy: Math.round(80 + smartPdRatio * 10), // ~88%
-      },
-      normalStats: {
-        ...n,
-        pd: n.total > 0 ? n.pd : 42,
-        pfa: n.total > 0 ? n.pfa : 14,
-        interceptTime: Math.round(520 + (1 - normalPdRatio) * 350), // ~720ms
-        scanEfficiency: Math.round(28 + normalPdRatio * 15), // ~34%
-        accuracy: Math.round(35 + normalPdRatio * 10), // ~40%
-      },
+      text: `${d > 0 ? '+' : ''}${d}${unit}`,
+      good: lowerIsBetter ? d < 0 : d > 0,
     };
-  }, [history]);
+  };
 
-  // Chart data for detection probability over time slots
-  const chartData = useMemo(() => {
-    if (snapshots.length > 0) return snapshots;
-
-    // Default sample curve if just starting
-    return Array.from({ length: 12 }, (_, i) => {
-      const slot = (i + 1) * 8;
-      return {
-        slot,
-        smartDetectionRate: Math.min(94, Math.round(75 + Math.sin(i) * 10 + i * 1.5)),
-        normalDetectionRate: Math.min(50, Math.round(35 + Math.cos(i) * 8)),
-        smartInterceptTime: Math.max(120, Math.round(210 - i * 6)),
-        normalInterceptTime: Math.round(680 + Math.sin(i * 0.5) * 40),
-        smartEfficiency: Math.min(92, Math.round(80 + i)),
-        normalEfficiency: Math.round(32 + Math.sin(i) * 3),
-      };
-    });
-  }, [snapshots]);
-
-  // Comparison Bar Data
-  const comparisonBars = [
-    {
-      metric: 'Prob. of Detection (Pd)',
-      smart: smartStats.pd,
-      normal: normalStats.pd,
-      unit: '%',
-    },
-    {
-      metric: 'Scan Efficiency',
-      smart: smartStats.scanEfficiency,
-      normal: normalStats.scanEfficiency,
-      unit: '%',
-    },
-    {
-      metric: 'Prediction Accuracy',
-      smart: smartStats.accuracy,
-      normal: normalStats.accuracy,
-      unit: '%',
-    },
-    {
-      metric: 'False Alarm Rate (Pfa)',
-      smart: smartStats.pfa,
-      normal: normalStats.pfa,
-      unit: '% (lower is better)',
-    },
+  const tableRows = [
+    { label: 'Probability of detection', unit: '%', a: smart.pd, b: seq.pd, modeled: false },
+    { label: 'False alarm rate', unit: '%', a: smart.pfa, b: seq.pfa, modeled: false, lower: true },
+    { label: 'Intercept latency', unit: ' ms', a: smart.latency, b: seq.latency, modeled: true, lower: true },
+    { label: 'Scan efficiency', unit: '%', a: smart.efficiency, b: seq.efficiency, modeled: true },
+    { label: 'Prediction accuracy', unit: '%', a: smart.accuracy, b: seq.accuracy, modeled: true },
   ];
 
+  const missing = smart.n === 0 ? 'Smart' : seq.n === 0 ? 'Sequential' : null;
+
   return (
-    <div className="space-y-6">
-      {/* Header Banner */}
-      <div className="bg-[#051c3d] border-4 border-[#09356b] rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-xl game-btn-pink flex items-center justify-center text-white">
-            <Activity className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-xl font-game font-extrabold text-white">
-                SCAN PERFORMANCE ANALYTICS
-              </h2>
-              <span className="text-[10px] font-game font-bold px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500">
-                SIMULATION RESULT
-              </span>
-            </div>
-            <p className="text-xs text-slate-300">
-              Comparative benchmark: Dynamic Priority Cognitive Scan vs. Sequential Sweep
-            </p>
-          </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold text-fg">Strategy comparison</h1>
+          <p className="mt-0.5 text-sm text-muted">
+            Smart (priority-driven) scan vs. sequential sweep, from the last {history.length} recorded scans.
+          </p>
         </div>
-
-        <div className="text-right">
-          <span className="text-[10px] font-mono text-slate-400 block uppercase">
-            SIMULATION DATA POINTS
+        <div className="flex gap-4 text-xs text-muted">
+          <span>
+            Smart <span className="font-mono text-fg tabular">n={smart.n}</span>
           </span>
-          <span className="text-sm font-mono font-bold text-[#6ef52c]">
-            {history.length} EW Observations Recorded
+          <span>
+            Sequential <span className="font-mono text-fg tabular">n={seq.n}</span>
           </span>
         </div>
       </div>
 
-      {/* Primary KPI Grid (6 Metrics Requested) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* Metric 1: Probability of Detection */}
-        <div className="bg-[#041a3d] border-2 border-[#09356b] rounded-2xl p-4 shadow-md">
-          <div className="flex justify-between items-start mb-2">
-            <span className="text-xs font-game font-bold text-slate-400 uppercase">
-              PROBABILITY OF DETECTION (Pd)
-            </span>
-            <Target className="w-4 h-4 text-[#6ef52c]" />
-          </div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-3xl font-game font-extrabold text-[#6ef52c]">
-              {smartStats.pd}%
-            </span>
-            <span className="text-xs text-slate-400">vs Normal {normalStats.pd}%</span>
-          </div>
-          <div className="text-[11px] text-slate-300 flex items-center gap-1 font-semibold">
-            <TrendingUp className="w-3.5 h-3.5 text-[#6ef52c]" />
-            <span>+{(smartStats.pd - normalStats.pd)}% higher burst detection</span>
-          </div>
-          <span className="text-[9px] font-mono text-cyan-400 uppercase mt-2 block">
-            SIMULATION RESULT
+      {missing && (
+        <div className="flex items-start gap-2 rounded-xl border border-line bg-surface px-4 py-3 text-xs text-muted">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-accent" />
+          <span>
+            No {missing.toLowerCase()} scans recorded yet.
+            {currentMode === (missing === 'Smart' ? 'SMART' : 'NORMAL')
+              ? ' Run the simulation for a while to collect data.'
+              : ` Switch the strategy to ${missing} in the top bar and let it run to compare.`}
           </span>
         </div>
+      )}
 
-        {/* Metric 2: Average Intercept Time */}
-        <div className="bg-[#041a3d] border-2 border-[#09356b] rounded-2xl p-4 shadow-md">
-          <div className="flex justify-between items-start mb-2">
-            <span className="text-xs font-game font-bold text-slate-400 uppercase">
-              AVG INTERCEPT TIME
-            </span>
-            <Clock className="w-4 h-4 text-cyan-400" />
-          </div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-3xl font-game font-extrabold text-cyan-300">
-              {smartStats.interceptTime} ms
-            </span>
-            <span className="text-xs text-slate-400">vs Normal {normalStats.interceptTime} ms</span>
-          </div>
-          <div className="text-[11px] text-slate-300 flex items-center gap-1 font-semibold">
-            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{(normalStats.interceptTime / Math.max(1, smartStats.interceptTime)).toFixed(1)}x faster emitter interception</span>
-          </div>
-          <span className="text-[9px] font-mono text-cyan-400 uppercase mt-2 block">
-            SIMULATION RESULT
-          </span>
-        </div>
-
-        {/* Metric 3: Scan Efficiency */}
-        <div className="bg-[#041a3d] border-2 border-[#09356b] rounded-2xl p-4 shadow-md">
-          <div className="flex justify-between items-start mb-2">
-            <span className="text-xs font-game font-bold text-slate-400 uppercase">
-              SCAN EFFICIENCY
-            </span>
-            <Zap className="w-4 h-4 text-amber-400" />
-          </div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-3xl font-game font-extrabold text-amber-300">
-              {smartStats.scanEfficiency}%
-            </span>
-            <span className="text-xs text-slate-400">vs Normal {normalStats.scanEfficiency}%</span>
-          </div>
-          <div className="text-[11px] text-slate-300 flex items-center gap-1 font-semibold">
-            <span>Dwell time allocated to active RF threat sectors</span>
-          </div>
-          <span className="text-[9px] font-mono text-cyan-400 uppercase mt-2 block">
-            SIMULATION RESULT
-          </span>
-        </div>
-
-        {/* Metric 4: False Alarm Rate */}
-        <div className="bg-[#041a3d] border-2 border-[#09356b] rounded-2xl p-4 shadow-md">
-          <div className="flex justify-between items-start mb-2">
-            <span className="text-xs font-game font-bold text-slate-400 uppercase">
-              FALSE ALARM RATE (Pfa)
-            </span>
-            <AlertTriangle className="w-4 h-4 text-rose-400" />
-          </div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-3xl font-game font-extrabold text-rose-400">
-              {smartStats.pfa}%
-            </span>
-            <span className="text-xs text-slate-400">vs Normal {normalStats.pfa}%</span>
-          </div>
-          <div className="text-[11px] text-slate-300 flex items-center gap-1 font-semibold">
-            <span>Filtered through informational uncertainty scoring</span>
-          </div>
-          <span className="text-[9px] font-mono text-cyan-400 uppercase mt-2 block">
-            SIMULATION RESULT
-          </span>
-        </div>
-
-        {/* Metric 5: Average Scan Time */}
-        <div className="bg-[#041a3d] border-2 border-[#09356b] rounded-2xl p-4 shadow-md">
-          <div className="flex justify-between items-start mb-2">
-            <span className="text-xs font-game font-bold text-slate-400 uppercase">
-              AVG DWELL CYCLE TIME
-            </span>
-            <Clock className="w-4 h-4 text-purple-400" />
-          </div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-3xl font-game font-extrabold text-purple-300">
-              42 ms
-            </span>
-            <span className="text-xs text-slate-400">per prioritized band</span>
-          </div>
-          <div className="text-[11px] text-slate-300 flex items-center gap-1 font-semibold">
-            <span>Optimal dwell budget without blind sweeps</span>
-          </div>
-          <span className="text-[9px] font-mono text-cyan-400 uppercase mt-2 block">
-            SIMULATION RESULT
-          </span>
-        </div>
-
-        {/* Metric 6: Prediction Accuracy */}
-        <div className="bg-[#041a3d] border-2 border-[#09356b] rounded-2xl p-4 shadow-md">
-          <div className="flex justify-between items-start mb-2">
-            <span className="text-xs font-game font-bold text-slate-400 uppercase">
-              PREDICTION ACCURACY
-            </span>
-            <TrendingUp className="w-4 h-4 text-[#6ef52c]" />
-          </div>
-          <div className="flex items-baseline gap-2 mb-2">
-            <span className="text-3xl font-game font-extrabold text-[#6ef52c]">
-              {smartStats.accuracy}%
-            </span>
-            <span className="text-xs text-slate-400">Bayesian belief alignment</span>
-          </div>
-          <div className="text-[11px] text-slate-300 flex items-center gap-1 font-semibold">
-            <span>Accurate anticipation of frequency agility transitions</span>
-          </div>
-          <span className="text-[9px] font-mono text-cyan-400 uppercase mt-2 block">
-            SIMULATION RESULT
-          </span>
-        </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard label="Probability of detection" unit="%" smart={smart.pd} seq={seq.pd} scaleMax={100} />
+        <MetricCard
+          label="False alarm rate"
+          unit="%"
+          smart={smart.pfa}
+          seq={seq.pfa}
+          scaleMax={100}
+          lowerIsBetter
+        />
+        <MetricCard
+          label="Intercept latency"
+          unit=" ms"
+          smart={smart.latency}
+          seq={seq.latency}
+          scaleMax={latencyMax}
+          lowerIsBetter
+          modeled
+        />
+        <MetricCard
+          label="Scan efficiency"
+          unit="%"
+          smart={smart.efficiency}
+          seq={seq.efficiency}
+          scaleMax={100}
+          modeled
+        />
       </div>
 
-      {/* Animated Charts Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Chart 1: Detection Probability Over Time */}
-        <div className="bg-[#051c3d] border-4 border-[#09356b] rounded-2xl p-4 shadow-xl">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-sm font-game font-extrabold text-white uppercase">
-                DETECTION PROBABILITY OVER TIME (Pd)
-              </h3>
-              <span className="text-[10px] font-mono text-cyan-300">
-                SIMULATION RESULT &middot; Time Slots 1 to 100
-              </span>
-            </div>
-            <span className="px-2 py-0.5 rounded text-[10px] font-game font-bold bg-[#6ef52c] text-black">
-              LIVE
-            </span>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Panel
+          title="Detection probability over time"
+          subtitle="Rolling Pd per strategy, sampled every 6 slots"
+          actions={<SourceTag />}
+        >
+          <div className="h-64">
+            {snapshots.length === 0 ? (
+              <EmptyChart text="Samples appear every 6 slots while the simulation runs." />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={snapshots} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                  <CartesianGrid stroke="#222936" vertical={false} />
+                  <XAxis dataKey="slot" {...axisProps} />
+                  <YAxis domain={[0, 100]} unit="%" {...axisProps} />
+                  <Tooltip {...tooltipStyle} />
+                  <Legend iconType="plainline" wrapperStyle={{ fontSize: 11, color: '#939cae' }} />
+                  <Line
+                    type="monotone"
+                    dataKey="smartDetectionRate"
+                    name="Smart"
+                    stroke={SMART_COLOR}
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="normalDetectionRate"
+                    name="Sequential"
+                    stroke={SEQ_COLOR}
+                    strokeWidth={2}
+                    strokeDasharray="4 3"
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
+        </Panel>
 
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="smartGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#6ef52c" stopOpacity={0.8} />
-                    <stop offset="95%" stopColor="#6ef52c" stopOpacity={0.05} />
-                  </linearGradient>
-                  <linearGradient id="normalGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#00b4d8" stopOpacity={0.7} />
-                    <stop offset="95%" stopColor="#00b4d8" stopOpacity={0.05} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#003575" />
-                <XAxis dataKey="slot" stroke="#8dc7ff" fontSize={11} />
-                <YAxis stroke="#8dc7ff" fontSize={11} domain={[0, 100]} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#021124',
-                    borderColor: '#0094ff',
-                    borderRadius: '8px',
-                    color: '#fff',
-                    fontFamily: 'monospace',
-                  }}
-                />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
-                <Area
-                  type="monotone"
-                  dataKey="smartDetectionRate"
-                  name="Smart Scan Pd (%)"
-                  stroke="#6ef52c"
-                  strokeWidth={2.5}
-                  fillOpacity={1}
-                  fill="url(#smartGrad)"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="normalDetectionRate"
-                  name="Normal Scan Pd (%)"
-                  stroke="#00b4d8"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#normalGrad)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+        <Panel
+          title="Intercept latency"
+          subtitle="Last 8 samples · lower is better"
+          actions={<SourceTag modeled />}
+        >
+          <div className="h-64">
+            {snapshots.length === 0 ? (
+              <EmptyChart text="Samples appear every 6 slots while the simulation runs." />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={snapshots.slice(-8)} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                  <CartesianGrid stroke="#222936" vertical={false} />
+                  <XAxis dataKey="slot" {...axisProps} />
+                  <YAxis unit=" ms" {...axisProps} />
+                  <Tooltip {...tooltipStyle} cursor={{ fill: '#171c25' }} />
+                  <Legend iconType="square" wrapperStyle={{ fontSize: 11, color: '#939cae' }} />
+                  <Bar dataKey="smartInterceptTime" name="Smart" fill={SMART_COLOR} radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                  <Bar dataKey="normalInterceptTime" name="Sequential" fill={SEQ_COLOR} radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
-        </div>
-
-        {/* Chart 2: Intercept Latency (ms) */}
-        <div className="bg-[#051c3d] border-4 border-[#09356b] rounded-2xl p-4 shadow-xl">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-sm font-game font-extrabold text-white uppercase">
-                INTERCEPT LATENCY (ms)
-              </h3>
-              <span className="text-[10px] font-mono text-cyan-300">
-                SIMULATION RESULT &middot; Lower latency is superior
-              </span>
-            </div>
-            <span className="px-2 py-0.5 rounded text-[10px] font-game font-bold bg-[#32e6ff] text-black">
-              ms
-            </span>
-          </div>
-
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData.slice(-6)} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#003575" />
-                <XAxis dataKey="slot" stroke="#8dc7ff" fontSize={11} />
-                <YAxis stroke="#8dc7ff" fontSize={11} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#021124',
-                    borderColor: '#0094ff',
-                    borderRadius: '8px',
-                    color: '#fff',
-                    fontFamily: 'monospace',
-                  }}
-                />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
-                <Bar dataKey="smartInterceptTime" name="Smart Intercept (ms)" fill="#6ef52c" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="normalInterceptTime" name="Normal Sweep (ms)" fill="#f72585" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+        </Panel>
       </div>
 
-      {/* Comparative Summary Table */}
-      <div className="bg-[#051c3d] border-4 border-[#09356b] rounded-2xl p-4 shadow-xl">
-        <h3 className="text-sm font-game font-extrabold text-white uppercase mb-3">
-          STRATEGY BENCHMARK SUMMARY (SIMULATION RESULT)
-        </h3>
-
+      <Panel title="Summary" bodyClassName="p-0">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
+          <table className="w-full min-w-[560px] text-left text-xs">
             <thead>
-              <tr className="border-b-2 border-[#09356b] text-slate-300 uppercase font-game">
-                <th className="py-2.5 px-3">Evaluation Metric</th>
-                <th className="py-2.5 px-3 text-[#6ef52c]">Smart Scan (Adaptive)</th>
-                <th className="py-2.5 px-3 text-cyan-300">Normal Scan (Sequential)</th>
-                <th className="py-2.5 px-3 text-amber-300">Operational EW Gain</th>
+              <tr className="border-b border-line text-[11px] uppercase tracking-wide text-faint">
+                <th scope="col" className="py-2 pl-4 pr-2 font-medium">Metric</th>
+                <th scope="col" className="px-2 py-2 text-right font-medium">Smart</th>
+                <th scope="col" className="px-2 py-2 text-right font-medium">Sequential</th>
+                <th scope="col" className="px-2 py-2 text-right font-medium">Difference</th>
+                <th scope="col" className="py-2 pl-2 pr-4 text-right font-medium">Source</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#09356b]/60 font-mono">
-              <tr>
-                <td className="py-2.5 px-3 font-sans font-bold text-white">Probability of Detection (Pd)</td>
-                <td className="py-2.5 px-3 text-[#6ef52c] font-bold">{smartStats.pd}%</td>
-                <td className="py-2.5 px-3 text-cyan-300">{normalStats.pd}%</td>
-                <td className="py-2.5 px-3 text-amber-300 font-bold">+{(smartStats.pd - normalStats.pd)}%</td>
-              </tr>
-              <tr>
-                <td className="py-2.5 px-3 font-sans font-bold text-white">Mean Intercept Time</td>
-                <td className="py-2.5 px-3 text-[#6ef52c] font-bold">{smartStats.interceptTime} ms</td>
-                <td className="py-2.5 px-3 text-cyan-300">{normalStats.interceptTime} ms</td>
-                <td className="py-2.5 px-3 text-amber-300 font-bold">
-                  {Math.round(normalStats.interceptTime - smartStats.interceptTime)} ms faster
-                </td>
-              </tr>
-              <tr>
-                <td className="py-2.5 px-3 font-sans font-bold text-white">Scan Dwell Efficiency</td>
-                <td className="py-2.5 px-3 text-[#6ef52c] font-bold">{smartStats.scanEfficiency}%</td>
-                <td className="py-2.5 px-3 text-cyan-300">{normalStats.scanEfficiency}%</td>
-                <td className="py-2.5 px-3 text-amber-300 font-bold">+{(smartStats.scanEfficiency - normalStats.scanEfficiency)}%</td>
-              </tr>
-              <tr>
-                <td className="py-2.5 px-3 font-sans font-bold text-white">False Alarm Rate (Pfa)</td>
-                <td className="py-2.5 px-3 text-[#6ef52c] font-bold">{smartStats.pfa}%</td>
-                <td className="py-2.5 px-3 text-cyan-300">{normalStats.pfa}%</td>
-                <td className="py-2.5 px-3 text-amber-300 font-bold">-{(normalStats.pfa - smartStats.pfa)}% reduction</td>
-              </tr>
-              <tr>
-                <td className="py-2.5 px-3 font-sans font-bold text-white">Agile Frequency Hopper Tracking</td>
-                <td className="py-2.5 px-3 text-[#6ef52c] font-bold">Locks within 1-2 hops</td>
-                <td className="py-2.5 px-3 text-cyan-300">Misses ~65% of burst hops</td>
-                <td className="py-2.5 px-3 text-amber-300 font-bold">Dominant tactical advantage</td>
-              </tr>
+            <tbody>
+              {tableRows.map((r) => {
+                const d = diff(r.a, r.b, r.unit, r.lower);
+                return (
+                  <tr key={r.label} className="border-b border-line/60 last:border-0">
+                    <td className="py-2 pl-4 pr-2 text-fg">{r.label}</td>
+                    <td className="px-2 py-2 text-right font-mono text-fg tabular">{fmt(r.a, r.unit)}</td>
+                    <td className="px-2 py-2 text-right font-mono text-muted tabular">{fmt(r.b, r.unit)}</td>
+                    <td
+                      className={cx(
+                        'px-2 py-2 text-right font-mono tabular',
+                        d.text === '—' ? 'text-faint' : d.good ? 'text-accent' : 'text-high'
+                      )}
+                    >
+                      {d.text}
+                    </td>
+                    <td className="py-2 pl-2 pr-4 text-right">
+                      <SourceTag modeled={r.modeled} />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
-      </div>
+      </Panel>
     </div>
   );
 };

@@ -3,156 +3,142 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import confetti from 'canvas-confetti';
 import {
-  FrequencyBandData,
   EngineWeights,
-  ScanMode,
-  ScanEvent,
+  FrequencyBandData,
   MetricSnapshot,
   Mission,
+  ScanEvent,
+  ScanMode,
+  SpectrumRow,
+  ViewTab,
 } from './types/spectrum';
 import {
-  INITIAL_BANDS,
   DEFAULT_WEIGHTS,
-  selectNextBand,
+  INITIAL_BANDS,
   advanceSimulationStep,
   calculatePriority,
+  selectNextBand,
 } from './utils/simulationEngine';
 import { sound } from './utils/audio';
 
-import { Header } from './components/Header';
-import { SpectrumGrid } from './components/SpectrumGrid';
-import { PriorityPanel } from './components/PriorityPanel';
-import { GameControlsToolbar } from './components/GameControlsToolbar';
-import { SimulationControls } from './components/SimulationControls';
-import { AnalyticsView } from './components/AnalyticsView';
-import { MissionModeView } from './components/MissionModeView';
-import { HowItWorksView } from './components/HowItWorksView';
-import { BandDetailModal } from './components/BandDetailModal';
+import { TopBar } from './components/TopBar';
+import { ScannerView } from './components/ScannerView';
+import { AnalyticsView, modelLatency } from './components/AnalyticsView';
+import { MissionsView } from './components/MissionsView';
+import { MethodView } from './components/MethodView';
+import { WATERFALL_ROWS } from './components/SpectrumView';
+
+const MAX_SLOTS = 100;
+
+const INITIAL_MISSIONS: Mission[] = [
+  {
+    id: 1,
+    title: 'Detect changing activity',
+    subtitle: 'Intercept 5 burst transmissions',
+    description:
+      'A burst transmitter is pulsing on high-frequency bands. Use Smart scan to catch the bursts and confirm 5 intercepts.',
+    goalType: 'detections',
+    targetValue: 5,
+    currentValue: 0,
+    completed: false,
+    scoreReward: 500,
+  },
+  {
+    id: 2,
+    title: 'Track the frequency hopper',
+    subtitle: 'Intercept the agile hopper 3 times',
+    description:
+      'An agile emitter changes band every few slots. Keep finding it after it jumps: 3 confirmed intercepts.',
+    goalType: 'hopper_track',
+    targetValue: 3,
+    currentValue: 0,
+    completed: false,
+    scoreReward: 750,
+  },
+  {
+    id: 3,
+    title: 'Reduce unnecessary scanning',
+    subtitle: 'Reach 85% scan efficiency',
+    description:
+      'Tune the heuristic weights so the receiver wastes as few dwells as possible on empty bands.',
+    goalType: 'efficiency',
+    targetValue: 85,
+    currentValue: 0,
+    completed: false,
+    scoreReward: 600,
+  },
+  {
+    id: 4,
+    title: 'Respond to sudden activity',
+    subtitle: 'Intercept tracking radars 4 times',
+    description:
+      'High-threat tracking radars pop up without warning. Intercept them before they complete a targeting cycle.',
+    goalType: 'intercept_fast',
+    targetValue: 4,
+    currentValue: 0,
+    completed: false,
+    scoreReward: 900,
+  },
+];
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return (
+    tag === 'INPUT' ||
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    tag === 'BUTTON' ||
+    target.isContentEditable
+  );
+}
 
 export default function App() {
-  // Navigation tab
-  const [currentTab, setCurrentTab] = useState<
-    'scan' | 'simulation' | 'analytics' | 'missions' | 'how-it-works'
-  >('scan');
-
-  // Audio system state
-  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [tab, setTab] = useState<ViewTab>('scanner');
+  const [isMuted, setIsMuted] = useState<boolean>(true);
 
   // Simulation engine state
   const [bands, setBands] = useState<FrequencyBandData[]>(INITIAL_BANDS);
   const [weights, setWeights] = useState<EngineWeights>(DEFAULT_WEIGHTS);
   const [scanMode, setScanMode] = useState<ScanMode>('SMART');
   const [isRunning, setIsRunning] = useState<boolean>(true);
-  const [speed, setSpeed] = useState<number>(1.0);
+  const [speed, setSpeed] = useState<number>(1);
   const [currentSlot, setCurrentSlot] = useState<number>(1);
-  const maxSlots = 100;
-
-  // Active scanner tracking
   const [currentBandId, setCurrentBandId] = useState<number>(5);
   const [nextBandId, setNextBandId] = useState<number>(3);
-  const [selectedBand, setSelectedBand] = useState<FrequencyBandData>(INITIAL_BANDS[4]);
-  const [inspectedBandModal, setInspectedBandModal] = useState<FrequencyBandData | null>(null);
+  const [inspectId, setInspectId] = useState<number | null>(null);
 
-  // Editor mode inspired by Geometry Dash
-  const [editorMode, setEditorMode] = useState<'BUILD' | 'EDIT' | 'DELETE'>('BUILD');
-
-  // Telemetry & metrics history
+  // Telemetry
   const [history, setHistory] = useState<ScanEvent[]>([]);
   const [snapshots, setSnapshots] = useState<MetricSnapshot[]>([]);
+  const [spectrumRows, setSpectrumRows] = useState<SpectrumRow[]>([]);
 
-  // Mission Mode state
-  const [score, setScore] = useState<number>(1450);
-  const [totalDetections, setTotalDetections] = useState<number>(18);
-  const [scanTime, setScanTime] = useState<number>(24);
-  const [missedSignals, setMissedSignals] = useState<number>(3);
+  // Missions
+  const [score, setScore] = useState<number>(0);
+  const [totalDetections, setTotalDetections] = useState<number>(0);
+  const [scanTime, setScanTime] = useState<number>(0);
+  const [missedSignals, setMissedSignals] = useState<number>(0);
   const [activeMissionId, setActiveMissionId] = useState<number>(1);
-
-  const [missions, setMissions] = useState<Mission[]>([
-    {
-      id: 1,
-      title: 'Detect Changing Activity',
-      subtitle: 'Intercept 5 sudden burst emitters',
-      description:
-        'A burst transmitter is pulsing on high-frequency bands. Use Smart Scan to anticipate bursts and achieve 5 confirmed intercepts.',
-      goalType: 'detections',
-      targetValue: 5,
-      currentValue: 3,
-      completed: false,
-      scoreReward: 500,
-    },
-    {
-      id: 2,
-      title: 'Find the Highest Priority Band',
-      subtitle: 'Lock onto frequency hopper',
-      description:
-        'Track an agile frequency hopping emitter across 3 band transitions without losing receiver lock.',
-      goalType: 'hopper_track',
-      targetValue: 3,
-      currentValue: 1,
-      completed: false,
-      scoreReward: 750,
-    },
-    {
-      id: 3,
-      title: 'Reduce Unnecessary Scanning',
-      subtitle: 'Achieve >85% scan efficiency',
-      description:
-        'Tune your cognitive heuristics to eliminate empty dwell time and keep scan efficiency above 85%.',
-      goalType: 'efficiency',
-      targetValue: 85,
-      currentValue: 78,
-      completed: false,
-      scoreReward: 600,
-    },
-    {
-      id: 4,
-      title: 'Respond to Sudden Activity Change',
-      subtitle: 'Intercept pop-up radar in <4 slots',
-      description:
-        'Detect and intercept an emerging high-threat fire control radar before it completes its targeting cycle.',
-      goalType: 'intercept_fast',
-      targetValue: 4,
-      currentValue: 2,
-      completed: false,
-      scoreReward: 900,
-    },
-  ]);
-
-  // Ref to hold current state for timer loop without stale closures
-  const stateRef = useRef({
-    bands,
-    currentBandId,
-    nextBandId,
-    scanMode,
-    currentSlot,
-    weights,
-    speed,
-    history,
-    missions,
-  });
+  const [missions, setMissions] = useState<Mission[]>(INITIAL_MISSIONS);
+  const [claimedIds, setClaimedIds] = useState<number[]>([]);
 
   useEffect(() => {
-    stateRef.current = {
-      bands,
-      currentBandId,
-      nextBandId,
-      scanMode,
-      currentSlot,
-      weights,
-      speed,
-      history,
-      missions,
-    };
-  }, [bands, currentBandId, nextBandId, scanMode, currentSlot, weights, speed, history, missions]);
+    sound.setMuted(isMuted);
+  }, [isMuted]);
 
-  // Execute 1 simulation step
+  // Mirror of the latest state so the timer callback never reads stale values
+  const stateRef = useRef({ bands, nextBandId, scanMode, currentSlot, weights, history, missions });
+  useEffect(() => {
+    stateRef.current = { bands, nextBandId, scanMode, currentSlot, weights, history, missions };
+  }, [bands, nextBandId, scanMode, currentSlot, weights, history, missions]);
+
   const executeStep = useCallback(() => {
     const {
       bands: curBands,
-      currentBandId: curBand,
-      nextBandId: nextBandCandidate,
+      nextBandId: targetBandId,
       scanMode: mode,
       currentSlot: slot,
       weights: curWeights,
@@ -160,11 +146,8 @@ export default function App() {
       missions: curMissions,
     } = stateRef.current;
 
-    // Advance scanner to next target band
-    const targetBandId = nextBandCandidate;
-    const nextSlot = slot >= maxSlots ? 1 : slot + 1;
+    const nextSlot = slot >= MAX_SLOTS ? 1 : slot + 1;
 
-    // Run simulation physics & RF updates
     const { updatedBands, detected, emitter } = advanceSimulationStep(
       curBands,
       targetBandId,
@@ -172,17 +155,12 @@ export default function App() {
       curWeights
     );
 
-    // Audio cue
     sound.playScannerHop();
-    if (detected) {
-      sound.playDetection();
-    }
+    if (detected) sound.playDetection();
 
-    // Determine the next band for the step after this
     const upcomingBandId = selectNextBand(updatedBands, targetBandId, mode);
-
-    // Record scan telemetry event
     const targetBand = updatedBands.find((b) => b.id === targetBandId);
+
     const newEvent: ScanEvent = {
       slot: nextSlot,
       bandId: targetBandId,
@@ -192,61 +170,55 @@ export default function App() {
       signalLevel: targetBand ? targetBand.signalStrength : -80,
       timestamp: Date.now(),
     };
-
     const newHistory = [...curHistory.slice(-99), newEvent];
 
-    // Update metrics and score
     if (detected) {
       setTotalDetections((d) => d + 1);
       setScore((s) => s + 50);
-    } else {
-      setMissedSignals((m) => m + (targetBand && targetBand.activity >= 50 ? 1 : 0));
+    } else if (targetBand && targetBand.activity >= 50) {
+      setMissedSignals((m) => m + 1);
     }
 
-    // Update snapshots every 6 slots for real charts
+    // Rolling per-strategy sample every 6 slots
     if (nextSlot % 6 === 0) {
-      const smartEvents = newHistory.filter((e) => e.mode === 'SMART');
-      const normalEvents = newHistory.filter((e) => e.mode === 'NORMAL');
-
-      const sPd = smartEvents.length > 0
-        ? Math.round((smartEvents.filter((e) => e.detected).length / smartEvents.length) * 100)
-        : 90;
-      const nPd = normalEvents.length > 0
-        ? Math.round((normalEvents.filter((e) => e.detected).length / normalEvents.length) * 100)
-        : 40;
-
+      const rate = (m: ScanMode): number | null => {
+        const events = newHistory.filter((e) => e.mode === m);
+        return events.length > 0
+          ? Math.round((events.filter((e) => e.detected).length / events.length) * 100)
+          : null;
+      };
+      const smartPd = rate('SMART');
+      const normalPd = rate('NORMAL');
       setSnapshots((prev) => [
         ...prev.slice(-18),
         {
           slot: nextSlot,
-          smartDetectionRate: Math.min(96, Math.max(30, sPd)),
-          normalDetectionRate: Math.min(60, Math.max(15, nPd)),
-          smartInterceptTime: Math.round(140 + Math.random() * 30),
-          normalInterceptTime: Math.round(680 + Math.random() * 80),
-          smartEfficiency: Math.min(94, Math.max(70, Math.round(sPd * 0.95))),
-          normalEfficiency: Math.round(30 + Math.random() * 8),
+          smartDetectionRate: smartPd,
+          normalDetectionRate: normalPd,
+          smartInterceptTime: smartPd === null ? null : modelLatency('SMART', smartPd),
+          normalInterceptTime: normalPd === null ? null : modelLatency('NORMAL', normalPd),
         },
       ]);
     }
 
-    // Update mission progress
-    const updatedMissions = curMissions.map((m) => {
-      let nextVal = m.currentValue;
-      if (m.id === 1 && detected && emitter === 'Burst Transmission') {
-        nextVal = Math.min(m.targetValue, nextVal + 1);
-      } else if (m.id === 2 && detected && emitter === 'Frequency Agile Hopper') {
-        nextVal = Math.min(m.targetValue, nextVal + 1);
-      } else if (m.id === 3 && mode === 'SMART') {
-        nextVal = Math.min(m.targetValue, nextVal + 2);
-      } else if (m.id === 4 && detected && emitter === 'Target Tracking Radar') {
-        nextVal = Math.min(m.targetValue, nextVal + 1);
-      }
+    setSpectrumRows((prev) => [
+      ...prev.slice(-(WATERFALL_ROWS - 1)),
+      {
+        slot: nextSlot,
+        activity: updatedBands.map((b) => b.activity),
+        scannedId: targetBandId,
+        detected,
+      },
+    ]);
 
-      return {
-        ...m,
-        currentValue: nextVal,
-        completed: nextVal >= m.targetValue,
-      };
+    const updatedMissions = curMissions.map((m) => {
+      let value = m.currentValue;
+      if (m.id === 1 && detected && emitter === 'Burst Transmission') value += 1;
+      else if (m.id === 2 && detected && emitter === 'Frequency Agile Hopper') value += 1;
+      else if (m.id === 3 && mode === 'SMART') value += 2;
+      else if (m.id === 4 && detected && emitter === 'Target Tracking Radar') value += 1;
+      value = Math.min(m.targetValue, value);
+      return { ...m, currentValue: value, completed: value >= m.targetValue };
     });
 
     setBands(updatedBands);
@@ -257,260 +229,185 @@ export default function App() {
     setMissions(updatedMissions);
   }, []);
 
-  // Main simulation timer loop
+  // Simulation clock
   useEffect(() => {
     if (!isRunning) return;
-
-    // Fast, rhythmic scan cycles: base 700ms down to 250ms at 2.5x speed
     const intervalMs = Math.max(220, Math.round(750 / speed));
     const timer = setInterval(() => {
       executeStep();
       setScanTime((t) => t + 1);
     }, intervalMs);
-
     return () => clearInterval(timer);
   }, [isRunning, speed, executeStep]);
 
-  // Inject a sudden high-power burst emitter
-  const handleInjectBurst = () => {
-    sound.playAlert();
-    const randomBandIndex = Math.floor(Math.random() * bands.length);
-    setBands((prev) =>
-      prev.map((b, idx) => {
-        if (idx === randomBandIndex) {
-          const updated = {
-            ...b,
-            state: 'HIGH' as const,
-            activity: 95,
-            signalStrength: -32,
-            emitterType: 'Burst Transmission' as const,
-            isAlerting: true,
-          };
-          updated.priorityScore = calculatePriority(updated, weights);
-          return updated;
-        }
-        return b;
-      })
-    );
-  };
+  const handleTogglePlay = useCallback(() => {
+    sound.playClick();
+    setIsRunning((r) => !r);
+  }, []);
 
-  // Reset simulation
-  const handleReset = () => {
+  const handleStep = useCallback(() => {
+    if (!isRunning) executeStep();
+  }, [executeStep, isRunning]);
+
+  const handleInjectBurst = useCallback(() => {
+    sound.playAlert();
+    setBands((prev) => {
+      const idx = Math.floor(Math.random() * prev.length);
+      return prev.map((b, i) => {
+        if (i !== idx) return b;
+        const updated: FrequencyBandData = {
+          ...b,
+          state: 'HIGH',
+          activity: 95,
+          signalStrength: -32,
+          emitterType: 'Burst Transmission',
+          isAlerting: true,
+        };
+        updated.priorityScore = calculatePriority(updated, stateRef.current.weights);
+        return updated;
+      });
+    });
+  }, []);
+
+  const handleReset = useCallback(() => {
     sound.playClick();
     setBands(INITIAL_BANDS);
     setCurrentSlot(1);
     setCurrentBandId(1);
-    setNextBandId(selectNextBand(INITIAL_BANDS, 1, scanMode));
+    setNextBandId(selectNextBand(INITIAL_BANDS, 1, stateRef.current.scanMode));
     setHistory([]);
     setSnapshots([]);
-  };
+    setSpectrumRows([]);
+    setInspectId(null);
+  }, []);
 
-  // Step backward in time
-  const handleStepBackward = () => {
+  const handleScanModeChange = useCallback((mode: ScanMode) => {
     sound.playClick();
-    setCurrentSlot((s) => (s > 1 ? s - 1 : maxSlots));
-  };
+    setScanMode(mode);
+  }, []);
 
-  // Manual cursor jump: previous band
-  const handlePrevBand = () => {
-    sound.playClick();
-    const prevId = currentBandId <= 1 ? bands.length : currentBandId - 1;
-    setCurrentBandId(prevId);
-    const target = bands.find((b) => b.id === prevId);
-    if (target) setSelectedBand(target);
-  };
-
-  // Manual cursor jump: next band
-  const handleNextBand = () => {
-    sound.playClick();
-    const nextId = currentBandId >= bands.length ? 1 : currentBandId + 1;
-    setCurrentBandId(nextId);
-    const target = bands.find((b) => b.id === nextId);
-    if (target) setSelectedBand(target);
-  };
-
-  // Band selection from grid
-  const handleSelectBand = (band: FrequencyBandData) => {
-    setSelectedBand(band);
-    setInspectedBandModal(band);
-  };
-
-  // Update heuristic weights and recalculate
   const handleUpdateWeights = (newWeights: EngineWeights) => {
     setWeights(newWeights);
-    setBands((prev) =>
-      prev.map((b) => ({
-        ...b,
-        priorityScore: calculatePriority(b, newWeights),
-      }))
-    );
+    setBands((prev) => prev.map((b) => ({ ...b, priorityScore: calculatePriority(b, newWeights) })));
   };
 
+  const handleClaim = (id: number) => {
+    const mission = missions.find((m) => m.id === id);
+    if (!mission || !mission.completed || claimedIds.includes(id)) return;
+    sound.playMissionComplete();
+    confetti({ particleCount: 70, spread: 70, origin: { y: 0.7 }, colors: ['#2dd4bf', '#5eead4', '#e7eaf0'] });
+    setClaimedIds((ids) => [...ids, id]);
+    setScore((s) => s + mission.scoreReward);
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || isTypingTarget(e.target)) return;
+      switch (e.key) {
+        case ' ':
+          e.preventDefault();
+          handleTogglePlay();
+          break;
+        case 'ArrowRight':
+          handleStep();
+          break;
+        case 'r':
+        case 'R':
+          handleReset();
+          break;
+        case 'm':
+        case 'M':
+          handleScanModeChange(stateRef.current.scanMode === 'SMART' ? 'NORMAL' : 'SMART');
+          break;
+        case 'b':
+        case 'B':
+          handleInjectBurst();
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [handleTogglePlay, handleStep, handleReset, handleScanModeChange, handleInjectBurst]);
+
   return (
-    <div className="min-h-screen bg-[#003882] text-white flex flex-col font-sans selection:bg-[#6ef52c] selection:text-black">
-      {/* Top Header */}
-      <Header
-        currentTab={currentTab}
-        setCurrentTab={setCurrentTab}
-        scanMode={scanMode}
-        setScanMode={setScanMode}
+    <div className="flex min-h-screen flex-col bg-bg font-sans text-fg">
+      <TopBar
+        tab={tab}
+        onTabChange={(t) => {
+          sound.playClick();
+          setTab(t);
+        }}
         isRunning={isRunning}
-        setIsRunning={setIsRunning}
+        onTogglePlay={handleTogglePlay}
+        onStep={handleStep}
         onReset={handleReset}
+        scanMode={scanMode}
+        onScanModeChange={handleScanModeChange}
+        speed={speed}
+        onSpeedChange={setSpeed}
+        onInjectBurst={handleInjectBurst}
         currentSlot={currentSlot}
-        maxSlots={maxSlots}
+        maxSlots={MAX_SLOTS}
         isMuted={isMuted}
-        setIsMuted={setIsMuted}
+        onToggleMute={() => setIsMuted((m) => !m)}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 flex flex-col gap-4">
-        {/* Simulation Bar (Play, Pause, Speed, Mode) */}
-        <SimulationControls
-          isRunning={isRunning}
-          onTogglePlay={() => setIsRunning(!isRunning)}
-          onReset={handleReset}
-          speed={speed}
-          setSpeed={setSpeed}
-          currentSlot={currentSlot}
-          maxSlots={maxSlots}
-          scanMode={scanMode}
-          setScanMode={setScanMode}
-          onInjectBurst={handleInjectBurst}
-        />
-
-        {/* Tab 1: SCANNER & MAIN WORKSPACE */}
-        {currentTab === 'scan' && (
-          <div className="flex flex-col lg:flex-row gap-4 items-stretch flex-1">
-            {/* Main Spectrum Grid Canvas (12 Bands) */}
-            <SpectrumGrid
-              bands={bands}
-              currentBandId={currentBandId}
-              nextBandId={nextBandId}
-              scanMode={scanMode}
-              onSelectBand={handleSelectBand}
-              selectedBandId={selectedBand.id}
-              slotNumber={currentSlot}
-              isRunning={isRunning}
-            />
-
-            {/* Right Side: AI SMART SCAN ENGINE PANEL */}
-            <PriorityPanel
-              bands={bands}
-              selectedBand={selectedBand}
-              weights={weights}
-              onUpdateWeights={handleUpdateWeights}
-              onSelectBand={(b) => setSelectedBand(b)}
-            />
-          </div>
-        )}
-
-        {/* Tab 2: SIMULATION ENGINE PARAMETERS SANDBOX */}
-        {currentTab === 'simulation' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-4">
-              <SpectrumGrid
-                bands={bands}
-                currentBandId={currentBandId}
-                nextBandId={nextBandId}
-                scanMode={scanMode}
-                onSelectBand={handleSelectBand}
-                selectedBandId={selectedBand.id}
-                slotNumber={currentSlot}
-                isRunning={isRunning}
-              />
-            </div>
-            <div>
-              <PriorityPanel
-                bands={bands}
-                selectedBand={selectedBand}
-                weights={weights}
-                onUpdateWeights={handleUpdateWeights}
-                onSelectBand={(b) => setSelectedBand(b)}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Tab 3: ANALYTICS SCREEN */}
-        {currentTab === 'analytics' && (
-          <AnalyticsView
+      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-5 sm:px-6">
+        {tab === 'scanner' && (
+          <ScannerView
+            bands={bands}
+            currentBandId={currentBandId}
+            nextBandId={nextBandId}
+            inspectId={inspectId}
+            scanMode={scanMode}
+            weights={weights}
+            rows={spectrumRows}
             history={history}
-            snapshots={snapshots}
-            currentMode={scanMode}
+            totalDetections={totalDetections}
+            missedSignals={missedSignals}
+            onUpdateWeights={handleUpdateWeights}
+            onInspect={(id) => setInspectId(id)}
+            onForceNext={(id) => {
+              sound.playClick();
+              setNextBandId(id);
+              setInspectId(null);
+            }}
           />
         )}
 
-        {/* Tab 4: MISSION MODE */}
-        {currentTab === 'missions' && (
-          <MissionModeView
+        {tab === 'analytics' && (
+          <AnalyticsView history={history} snapshots={snapshots} currentMode={scanMode} />
+        )}
+
+        {tab === 'missions' && (
+          <MissionsView
             missions={missions}
-            onStartMission={(id) => setActiveMissionId(id)}
             activeMissionId={activeMissionId}
+            claimedIds={claimedIds}
+            onSelectMission={setActiveMissionId}
+            onClaim={handleClaim}
             score={score}
             totalDetections={totalDetections}
             scanTime={scanTime}
             missedSignals={missedSignals}
             scanMode={scanMode}
-            onToggleMode={() => setScanMode(scanMode === 'SMART' ? 'NORMAL' : 'SMART')}
+            onUseSmart={() => handleScanModeChange('SMART')}
             isRunning={isRunning}
-            onTogglePlay={() => setIsRunning(!isRunning)}
+            onTogglePlay={handleTogglePlay}
             onInjectBurst={handleInjectBurst}
           />
         )}
 
-        {/* Tab 5: HOW IT WORKS */}
-        {currentTab === 'how-it-works' && <HowItWorksView />}
+        {tab === 'method' && <MethodView weights={weights} />}
       </main>
 
-      {/* Bottom Large Game Controls Toolbar Inspired by Geometry Dash */}
-      <GameControlsToolbar
-        weights={weights}
-        onUpdateWeights={handleUpdateWeights}
-        onStepForward={executeStep}
-        onStepBackward={handleStepBackward}
-        onReset={handleReset}
-        onPrevBand={handlePrevBand}
-        onNextBand={handleNextBand}
-        isRunning={isRunning}
-        onTogglePlay={() => setIsRunning(!isRunning)}
-        scanMode={scanMode}
-        onToggleMode={() => setScanMode(scanMode === 'SMART' ? 'NORMAL' : 'SMART')}
-        onInjectBurst={handleInjectBurst}
-        editorMode={editorMode}
-        setEditorMode={setEditorMode}
-        speed={speed}
-        setSpeed={setSpeed}
-      />
-
-      {/* Footer & Educational Disclaimer */}
-      <footer className="bg-[#020b18] border-t-2 border-[#09356b] py-3 px-4 text-center select-none text-xs text-slate-400">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className="font-game font-extrabold text-[#6ef52c]">
-              📡 SPECTRUM SCOUT
-            </span>
-            <span className="text-slate-500">&middot;</span>
-            <span className="italic text-slate-300">
-              &ldquo;Don&apos;t scan everything equally. Scan what matters next.&rdquo;
-            </span>
-          </div>
-
-          <div className="text-[11px] text-slate-400">
-            Simulation environment for educational and research demonstration. No real RF signals or hardware are used.
-          </div>
+      <footer className="border-t border-line">
+        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-1 px-4 py-4 text-xs text-faint sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <span>Spectrum Scout · Don&apos;t scan everything equally. Scan what matters next.</span>
+          <span>Educational simulation. No real RF signals or hardware are used.</span>
         </div>
       </footer>
-
-      {/* Inspect Band Detail Modal */}
-      <BandDetailModal
-        band={inspectedBandModal}
-        onClose={() => setInspectedBandModal(null)}
-        onSetPriorityFocus={(bandId) => {
-          setCurrentBandId(bandId);
-          setNextBandId(bandId);
-        }}
-      />
     </div>
   );
 }
